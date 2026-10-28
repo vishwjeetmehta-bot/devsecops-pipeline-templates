@@ -1,0 +1,354 @@
+name: "🛡️ Terraform DevSecOps Pipeline"
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+      - ".github/workflows/terraform-full-devsecops.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+
+permissions:
+  contents: read
+  pull-requests: write
+  security-events: write
+  id-token: write
+
+env:
+  TF_VERSION: "1.9.0"
+  CHECKOV_VERSION: "3.2.0"
+  INFRACOST_VERSION: "0.10.x"
+  ARM_USE_OIDC: true
+
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # GATE 1: Secret Detection with GitLeaks
+  # ─────────────────────────────────────────────────────────────
+  secret-scan:
+    name: "🔍 Secret Detection (GitLeaks)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for GitLeaks scan
+
+      - name: Run GitLeaks Secret Scan
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+        with:
+          config-path: .gitleaks.toml
+
+  # ─────────────────────────────────────────────────────────────
+  # GATE 2: IaC Security Scan with Checkov + tfsec
+  # ─────────────────────────────────────────────────────────────
+  iac-security-scan:
+    name: "🔒 IaC Security Scan (Checkov + tfsec)"
+    runs-on: ubuntu-latest
+    needs: secret-scan
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Checkov
+        run: pip install checkov==${{ env.CHECKOV_VERSION }}
+
+      - name: Run Checkov IaC Scan
+        run: |
+          checkov \
+            --directory . \
+            --framework terraform \
+            --output sarif \
+            --output-file checkov-results.sarif \
+            --soft-fail \
+            --check CKV_AZURE_* \
+            --compact \
+            --quiet
+        continue-on-error: false
+
+      - name: Upload Checkov SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: checkov-results.sarif
+          category: "checkov-iac"
+
+      - name: Install tfsec
+        run: |
+          curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+
+      - name: Run tfsec CIS Azure Scan
+        run: |
+          tfsec . \
+            --format sarif \
+            --out tfsec-results.sarif \
+            --minimum-severity HIGH \
+            --exclude-downloaded-modules
+
+      - name: Upload tfsec SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: tfsec-results.sarif
+          category: "tfsec-cis"
+
+  # ─────────────────────────────────────────────────────────────
+  # GATE 3: Terraform Format, Validate & Lint
+  # ─────────────────────────────────────────────────────────────
+  terraform-lint:
+    name: "✅ Terraform Lint & Validate"
+    runs-on: ubuntu-latest
+    needs: secret-scan
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Terraform Format Check
+        id: fmt
+        run: terraform fmt -check -recursive -diff
+        continue-on-error: false
+
+      - name: Install TFLint
+        uses: terraform-linters/setup-tflint@v4
+        with:
+          tflint_version: latest
+
+      - name: Initialize TFLint
+        run: tflint --init
+
+      - name: Run TFLint
+        run: tflint --format compact --recursive
+
+      - name: Terraform Init
+        run: terraform init -backend=false
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+
+      - name: Terraform Validate
+        run: terraform validate
+
+  # ─────────────────────────────────────────────────────────────
+  # GATE 4: FinOps Cost Estimation with Infracost
+  # ─────────────────────────────────────────────────────────────
+  infracost-estimate:
+    name: "💰 FinOps Cost Estimation (Infracost)"
+    runs-on: ubuntu-latest
+    needs: terraform-lint
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Checkout Base Branch (for diff)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.base.ref }}
+          path: base-branch
+
+      - name: Generate Infracost Baseline
+        run: |
+          infracost breakdown \
+            --path=base-branch \
+            --format=json \
+            --out-file=/tmp/infracost-base.json
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+
+      - name: Generate Infracost PR Diff
+        run: |
+          infracost breakdown \
+            --path=. \
+            --format=json \
+            --out-file=/tmp/infracost-pr.json
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+
+      - name: Post Infracost PR Comment
+        run: |
+          infracost comment github \
+            --path=/tmp/infracost-pr.json \
+            --github-token=${{ secrets.GITHUB_TOKEN }} \
+            --pull-request=${{ github.event.pull_request.number }} \
+            --repo=${{ github.repository }} \
+            --behavior=update \
+            --show-all-projects
+
+  # ─────────────────────────────────────────────────────────────
+  # GATE 5: Terraform Plan (with Drift Detection)
+  # ─────────────────────────────────────────────────────────────
+  terraform-plan:
+    name: "📋 Terraform Plan & Drift Detection"
+    runs-on: ubuntu-latest
+    needs: [iac-security-scan, terraform-lint]
+    environment: plan
+    outputs:
+      plan_exitcode: ${{ steps.plan.outputs.exitcode }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Azure OIDC Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.ARM_CLIENT_ID }}
+          tenant-id: ${{ secrets.ARM_TENANT_ID }}
+          subscription-id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+      - name: Terraform Init
+        run: terraform init
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          terraform plan \
+            -detailed-exitcode \
+            -out=tfplan \
+            -input=false \
+            -var-file="environments/${{ github.ref_name }}.tfvars" 2>&1 | tee plan-output.txt
+          echo "exitcode=$?" >> $GITHUB_OUTPUT
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+        continue-on-error: true
+
+      - name: Detect Drift (Exit Code 2 = Changes Detected)
+        if: steps.plan.outputs.exitcode == '2'
+        run: |
+          echo "::warning::⚠️ Infrastructure drift detected! Changes exist between Git state and live Azure state."
+
+      - name: Fail on Terraform Error
+        if: steps.plan.outputs.exitcode == '1'
+        run: exit 1
+
+      - name: Upload Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan-${{ github.sha }}
+          path: tfplan
+          retention-days: 7
+
+      - name: Post Plan Summary to PR
+        uses: actions/github-script@v7
+        if: github.event_name == 'pull_request'
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const fs = require('fs');
+            const planOutput = fs.readFileSync('plan-output.txt', 'utf8');
+            const truncated = planOutput.length > 60000
+              ? planOutput.substring(0, 60000) + '\n\n... [truncated]'
+              : planOutput;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 📋 Terraform Plan Output\n\n<details><summary>Click to expand plan</summary>\n\n\`\`\`hcl\n${truncated}\n\`\`\`\n</details>`
+            });
+
+  # ─────────────────────────────────────────────────────────────
+  # GATE 6: Production Apply (Main branch only, requires approval)
+  # ─────────────────────────────────────────────────────────────
+  terraform-apply:
+    name: "🚀 Terraform Apply (Production)"
+    runs-on: ubuntu-latest
+    needs: terraform-plan
+    if: |
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'push' &&
+      needs.terraform-plan.outputs.plan_exitcode == '2'
+    environment: production  # Requires manual approval in GitHub Environments
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Azure OIDC Login
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.ARM_CLIENT_ID }}
+          tenant-id: ${{ secrets.ARM_TENANT_ID }}
+          subscription-id: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+
+      - name: Terraform Init
+        run: terraform init
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+
+      - name: Download Approved Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan-${{ github.sha }}
+
+      - name: Terraform Apply (Approved Plan Only)
+        run: terraform apply -input=false tfplan
+        env:
+          ARM_CLIENT_ID: ${{ secrets.ARM_CLIENT_ID }}
+          ARM_CLIENT_SECRET: ${{ secrets.ARM_CLIENT_SECRET }}
+          ARM_SUBSCRIPTION_ID: ${{ secrets.ARM_SUBSCRIPTION_ID }}
+          ARM_TENANT_ID: ${{ secrets.ARM_TENANT_ID }}
+
+      - name: Notify Teams on Success
+        if: success()
+        uses: aliencube/microsoft-teams-actions@v0.8.0
+        with:
+          webhook_uri: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          title: "✅ Terraform Apply Succeeded"
+          summary: "Production infrastructure updated successfully for ${{ github.repository }}"
+          theme_color: "00FF00"
+
+      - name: Notify Teams on Failure
+        if: failure()
+        uses: aliencube/microsoft-teams-actions@v0.8.0
+        with:
+          webhook_uri: ${{ secrets.TEAMS_WEBHOOK_URL }}
+          title: "❌ Terraform Apply FAILED"
+          summary: "Production apply failed for ${{ github.repository }} — immediate attention required!"
+          theme_color: "FF0000"

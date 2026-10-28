@@ -1,0 +1,250 @@
+trigger:
+  branches:
+    include:
+      - main
+      - "feature/*"
+      - "release/*"
+  paths:
+    include:
+      - "**/*.tf"
+      - "**/*.tfvars"
+      - "azure-devops/azure-terraform-pipeline.yml"
+
+pool:
+  vmImage: "ubuntu-latest"
+
+variables:
+  - group: devsecops-secrets  # Variable Group in Azure DevOps Library
+  - name: TF_VERSION
+    value: "1.9.0"
+  - name: WORKING_DIRECTORY
+    value: "$(System.DefaultWorkingDirectory)"
+  - name: TF_STATE_RESOURCE_GROUP
+    value: "rg-terraform-state-prod"
+  - name: TF_STATE_STORAGE_ACCOUNT
+    value: "stterraformstateprod"
+  - name: TF_STATE_CONTAINER
+    value: "tfstate"
+
+stages:
+  # ════════════════════════════════════════════════
+  # STAGE 1: Security Scanning
+  # ════════════════════════════════════════════════
+  - stage: SecurityScan
+    displayName: "🔒 Security & Quality Gates"
+    jobs:
+      - job: SecretScan
+        displayName: "🔍 GitLeaks Secret Scan"
+        steps:
+          - checkout: self
+            fetchDepth: 0  # Full git history for GitLeaks
+
+          - script: |
+              docker run --rm \
+                -v $(pwd):/path \
+                zricethezav/gitleaks:latest \
+                detect \
+                --source="/path" \
+                --report-format=json \
+                --report-path=/path/gitleaks-report.json \
+                --verbose
+            displayName: "Run GitLeaks on Full Git History"
+
+          - task: PublishBuildArtifacts@1
+            condition: always()
+            inputs:
+              pathToPublish: "$(System.DefaultWorkingDirectory)/gitleaks-report.json"
+              artifactName: "gitleaks-report"
+
+      - job: IaCScan
+        displayName: "🛡️ IaC Security Scan (Checkov + tfsec)"
+        dependsOn: SecretScan
+        steps:
+          - checkout: self
+
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: "3.12"
+
+          - script: |
+              pip install checkov==3.2.0
+              checkov \
+                --directory $(WORKING_DIRECTORY) \
+                --framework terraform \
+                --output junitxml \
+                --output-file checkov-results.xml \
+                --check CKV_AZURE_* \
+                --compact \
+                --soft-fail
+            displayName: "Run Checkov CIS Azure Scan"
+
+          - task: PublishTestResults@2
+            condition: always()
+            inputs:
+              testResultsFormat: "JUnit"
+              testResultsFiles: "checkov-results.xml"
+              testRunTitle: "Checkov IaC Security Scan"
+              failTaskOnFailedTests: true
+
+          - script: |
+              curl -s https://raw.githubusercontent.com/aquasecurity/tfsec/master/scripts/install_linux.sh | bash
+              tfsec $(WORKING_DIRECTORY) \
+                --format junit \
+                --out tfsec-results.xml \
+                --minimum-severity HIGH
+            displayName: "Run tfsec CIS Benchmark Scan"
+
+          - task: PublishTestResults@2
+            condition: always()
+            inputs:
+              testResultsFormat: "JUnit"
+              testResultsFiles: "tfsec-results.xml"
+              testRunTitle: "tfsec CIS Scan"
+              failTaskOnFailedTests: true
+
+  # ════════════════════════════════════════════════
+  # STAGE 2: Terraform Plan + Infracost
+  # ════════════════════════════════════════════════
+  - stage: Plan
+    displayName: "📋 Terraform Plan + Cost Estimation"
+    dependsOn: SecurityScan
+    condition: succeeded()
+    jobs:
+      - job: TerraformPlan
+        displayName: "Terraform Plan & Infracost"
+        steps:
+          - checkout: self
+
+          - task: TerraformInstaller@1
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          - task: TerraformTaskV4@4
+            displayName: "Terraform Init"
+            inputs:
+              provider: "azurerm"
+              command: "init"
+              workingDirectory: "$(WORKING_DIRECTORY)"
+              backendServiceArm: "ARM-Service-Connection"
+              backendAzureRmResourceGroupName: "$(TF_STATE_RESOURCE_GROUP)"
+              backendAzureRmStorageAccountName: "$(TF_STATE_STORAGE_ACCOUNT)"
+              backendAzureRmContainerName: "$(TF_STATE_CONTAINER)"
+              backendAzureRmKey: "$(Build.SourceBranchName).terraform.tfstate"
+
+          - task: TerraformTaskV4@4
+            displayName: "Terraform Validate"
+            inputs:
+              provider: "azurerm"
+              command: "validate"
+              workingDirectory: "$(WORKING_DIRECTORY)"
+
+          - task: TerraformTaskV4@4
+            displayName: "Terraform Plan"
+            inputs:
+              provider: "azurerm"
+              command: "plan"
+              workingDirectory: "$(WORKING_DIRECTORY)"
+              commandOptions: >
+                -detailed-exitcode
+                -out=$(Build.ArtifactStagingDirectory)/tfplan
+                -input=false
+                -var-file="environments/$(Build.SourceBranchName).tfvars"
+            env:
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+
+          - script: |
+              curl -fsSL https://raw.githubusercontent.com/infracost/infracost/master/scripts/install.sh | sh
+              infracost breakdown \
+                --path $(WORKING_DIRECTORY) \
+                --format table \
+                --out-file infracost-report.txt
+              cat infracost-report.txt
+            displayName: "Infracost FinOps Estimate"
+            env:
+              INFRACOST_API_KEY: $(INFRACOST_API_KEY)
+              ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+              ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+              ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+              ARM_TENANT_ID: $(ARM_TENANT_ID)
+
+          - task: PublishBuildArtifacts@1
+            inputs:
+              pathToPublish: "$(Build.ArtifactStagingDirectory)/tfplan"
+              artifactName: "terraform-plan"
+
+          - task: PublishBuildArtifacts@1
+            inputs:
+              pathToPublish: "$(System.DefaultWorkingDirectory)/infracost-report.txt"
+              artifactName: "infracost-report"
+
+  # ════════════════════════════════════════════════
+  # STAGE 3: Production Apply (main branch + approval)
+  # ════════════════════════════════════════════════
+  - stage: Apply
+    displayName: "🚀 Terraform Apply (Production)"
+    dependsOn: Plan
+    condition: |
+      and(
+        succeeded(),
+        eq(variables['Build.SourceBranch'], 'refs/heads/main')
+      )
+    jobs:
+      - deployment: TerraformApply
+        displayName: "Apply Approved Terraform Plan"
+        environment: "Production"  # Requires approval gates in Azure DevOps Environments
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: TerraformInstaller@1
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - task: DownloadBuildArtifacts@1
+                  inputs:
+                    artifactName: "terraform-plan"
+                    downloadPath: "$(System.ArtifactsDirectory)"
+
+                - task: TerraformTaskV4@4
+                  displayName: "Terraform Init"
+                  inputs:
+                    provider: "azurerm"
+                    command: "init"
+                    workingDirectory: "$(WORKING_DIRECTORY)"
+                    backendServiceArm: "ARM-Service-Connection"
+                    backendAzureRmResourceGroupName: "$(TF_STATE_RESOURCE_GROUP)"
+                    backendAzureRmStorageAccountName: "$(TF_STATE_STORAGE_ACCOUNT)"
+                    backendAzureRmContainerName: "$(TF_STATE_CONTAINER)"
+                    backendAzureRmKey: "main.terraform.tfstate"
+
+                - task: TerraformTaskV4@4
+                  displayName: "Terraform Apply Approved Plan"
+                  inputs:
+                    provider: "azurerm"
+                    command: "apply"
+                    workingDirectory: "$(WORKING_DIRECTORY)"
+                    commandOptions: "-input=false $(System.ArtifactsDirectory)/terraform-plan/tfplan"
+                  env:
+                    ARM_CLIENT_ID: $(ARM_CLIENT_ID)
+                    ARM_CLIENT_SECRET: $(ARM_CLIENT_SECRET)
+                    ARM_SUBSCRIPTION_ID: $(ARM_SUBSCRIPTION_ID)
+                    ARM_TENANT_ID: $(ARM_TENANT_ID)
+
+                - task: InvokeRestAPI@1
+                  displayName: "Notify Teams on Apply Success"
+                  condition: succeeded()
+                  inputs:
+                    connectionType: "connectedServiceName"
+                    serviceConnection: "TeamsWebhookConnection"
+                    method: "POST"
+                    body: |
+                      {
+                        "@type": "MessageCard",
+                        "summary": "Terraform Apply Succeeded",
+                        "themeColor": "00FF00",
+                        "title": "✅ Terraform Apply Succeeded",
+                        "text": "Production infrastructure updated by **$(Build.RequestedFor)** for repository **$(Build.Repository.Name)**."
+                      }

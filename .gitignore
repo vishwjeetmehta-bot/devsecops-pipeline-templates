@@ -1,0 +1,55 @@
+# Compiled/Generated files
+*.pyc
+__pycache__/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.backup
+*.tfplan
+*.tfvars.json
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+
+# Infracost
+.infracost/
+
+# Security scan reports (generated at runtime — don't commit)
+checkov-reports/
+trivy-reports/
+gitleaks-report.json
+trivy-results.sarif
+checkov-results.sarif
+tfsec-results.sarif
+sonar-project.properties.backup
+
+# Local environment files — NEVER commit secrets
+.env
+.env.*
+!.env.example
+*.env
+*.secrets
+secrets.yaml
+secrets.json
+credentials.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# OS
+*.log
+*.tmp

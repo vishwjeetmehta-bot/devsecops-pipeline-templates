@@ -1,0 +1,10 @@
+# DevSecOps Pipeline — Security Ignorelist for Trivy
+# Each entry MUST have a documented justification comment
+
+# ── Format ───────────────────────────────────────────────────────────────────
+# CVE-XXXX-XXXXX  # <date> <reason> <owner>
+# ─────────────────────────────────────────────────────────────────────────────
+
+# EXAMPLE entries (remove before production use):
+# CVE-2023-44487   # 2024-01-15 | HTTP/2 rapid reset — mitigated at WAF layer | security@example.com
+# CVE-2024-21626   # 2024-02-01 | runc CVE — distroless image not affected | devops@example.com

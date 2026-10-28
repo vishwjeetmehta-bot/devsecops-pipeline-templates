@@ -1,0 +1,77 @@
+title = "GitLeaks Configuration — DevSecOps Pipeline Templates"
+
+[extend]
+# Extend the default GitLeaks ruleset
+useDefault = true
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Custom Rules — Azure & Cloud Specific
+# ─────────────────────────────────────────────────────────────────────────────
+
+[[rules]]
+id = "azure-client-secret"
+description = "Azure Service Principal Client Secret"
+regex = '''(?i)(ARM_CLIENT_SECRET|AZURE_CLIENT_SECRET|client.?secret)\s*=\s*['""]?[a-zA-Z0-9~_.-]{30,}['""]?'''
+secretGroup = 1
+tags = ["azure", "credentials", "iac"]
+
+[[rules]]
+id = "azure-storage-account-key"
+description = "Azure Storage Account Access Key"
+regex = '''(?i)(storage.?account.?key|AZURE_STORAGE_KEY)\s*=\s*['""]?[a-zA-Z0-9+/]{86}==['""]?'''
+secretGroup = 1
+tags = ["azure", "storage", "credentials"]
+
+[[rules]]
+id = "azure-sas-token"
+description = "Azure SAS Token"
+regex = '''(?i)sig=[a-zA-Z0-9%]{40,}(&|$)'''
+tags = ["azure", "sas", "credentials"]
+
+[[rules]]
+id = "infracost-api-key"
+description = "Infracost API Key"
+regex = '''(?i)(INFRACOST_API_KEY)\s*=\s*ico-[a-zA-Z0-9]{32,}'''
+secretGroup = 1
+tags = ["infracost", "finops", "credentials"]
+
+[[rules]]
+id = "sonarqube-token"
+description = "SonarQube Authentication Token"
+regex = '''(?i)(SONAR_TOKEN|sonar.?token)\s*=\s*['""]?[a-zA-Z0-9]{32,}['""]?'''
+secretGroup = 1
+tags = ["sonarqube", "sast", "credentials"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Allowlist — Known False Positives (Document each one!)
+# ─────────────────────────────────────────────────────────────────────────────
+
+[allowlist]
+description = "Global Allowlist for Documented False Positives"
+
+# Allow example/placeholder values in documentation
+regexes = [
+  '''REPLACE_WITH_YOUR_.*''',
+  '''<YOUR_.*>''',
+  '''your-.*-here''',
+  '''example\.com''',
+  '''placeholder''',
+  '''xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx''',  # UUID placeholder format
+  '''00000000-0000-0000-0000-000000000000''',  # Zero UUID
+]
+
+# Specific paths to exclude from scanning
+paths = [
+  '''.github/workflows''',       # Workflow files reference secrets via ${{ secrets.* }} - not actual values
+  '''docs/''',                   # Documentation may contain example strings
+  '''*.md''',                    # Markdown documentation files
+  '''CHANGELOG*''',
+  '''LICENSE''',
+  '''.trivyignore''',
+  '''.gitleaks.toml''',          # This file itself
+]
+
+# Specific commits to exclude (document WHY each is excluded)
+# commits = [
+#   "abc123"  # Rotated credential accidentally committed — already invalidated
+# ]
