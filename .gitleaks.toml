@@ -64,8 +64,8 @@ regexes = [
 paths = [
   '''.github/workflows''',       # Workflow files reference secrets via ${{ secrets.* }} - not actual values
   '''docs/''',                   # Documentation may contain example strings
-  '''*.md''',                    # Markdown documentation files
-  '''CHANGELOG*''',
+  '''.*\.md''',                    # Markdown documentation files
+  '''CHANGELOG.*''',
   '''LICENSE''',
   '''.trivyignore''',
   '''.gitleaks.toml''',          # This file itself
