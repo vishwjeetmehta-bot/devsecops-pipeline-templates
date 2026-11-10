@@ -1,6 +1,7 @@
 name: "🛡️ Terraform DevSecOps Pipeline"
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
