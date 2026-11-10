@@ -186,5 +186,5 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 <div align="center">
-  <sub>Built with ❤️ by <b>Vishwjeet Kumar Mehta</b> • Senior DevOps & DevSecOps Consultant • <a href="https://linkedin.com/in/vishwjeetmehta">LinkedIn</a></sub>
+  <sub>Built with ❤️ by <b>Vishwjeet Kumar Mehta</b> • Senior DevOps & DevSecOps Consultant • <a href="https://www.linkedin.com/in/vishwjeet-mehta/">LinkedIn</a></sub>
 </div>
