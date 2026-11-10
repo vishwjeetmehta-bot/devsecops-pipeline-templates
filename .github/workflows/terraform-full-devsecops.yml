@@ -2,17 +2,7 @@ name: "🛡️ Terraform DevSecOps Pipeline"
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
-    paths:
-      - "**.tf"
-      - "**.tfvars"
-      - ".github/workflows/terraform-full-devsecops.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "**.tf"
-      - "**.tfvars"
+  workflow_call:
 
 permissions:
   contents: read
@@ -45,8 +35,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
-        with:
-          config-path: .gitleaks.toml
 
   # ─────────────────────────────────────────────────────────────
   # GATE 2: IaC Security Scan with Checkov + tfsec

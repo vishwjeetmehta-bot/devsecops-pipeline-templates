@@ -1,0 +1,60 @@
+name: "🛡️ DevSecOps Templates CI"
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  secret-scan:
+    name: "🔍 Secret Detection (GitLeaks)"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run GitLeaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: false
+
+  validate-templates:
+    name: "✅ Validate Pipeline Templates & Scripts"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Verify Shell Scripts
+        run: |
+          chmod +x scripts/*.sh
+          bash -n scripts/checkov-scan.sh
+          bash -n scripts/trivy-scan.sh
+          echo "All helper scripts passed syntax verification."
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install YAML parser
+        run: pip install pyyaml
+
+      - name: Validate YAML Files
+        run: |
+          python3 -c "
+          import yaml, glob
+          yaml_files = glob.glob('**/*.yml', recursive=True) + glob.glob('**/*.yaml', recursive=True)
+          for f in yaml_files:
+              with open(f, 'r') as stream:
+                  yaml.safe_load(stream)
+                  print(f'✓ Valid YAML: {f}')
+          "
